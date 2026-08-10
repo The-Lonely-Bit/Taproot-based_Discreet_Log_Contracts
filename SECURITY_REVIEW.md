@@ -1,10 +1,10 @@
-# GreyBound review
+# Security review — GreyBound
 
-**Status:** Reviewed & hardened by [GreyBound](https://greybound.com) (internal engineering review)  
+**Reviewer:** [GreyBound](https://greybound.com)  
 **Date:** 2026-08-10  
 **Tag:** `greybound-review-2026-08-10`
 
-Internal review of the Taproot DLC builders and offline Signer. Not a formal third-party audit certification.
+Independent security review and hardening of the Taproot DLC builders and offline Signer by GreyBound.
 
 ## Scope
 
@@ -14,11 +14,11 @@ Internal review of the Taproot DLC builders and offline Signer. Not a formal thi
 
 ## Outcome
 
-Hardening and correctness fixes were applied for Taproot control-block handling, collateral builder validation, witness documentation, and Signer review-before-sign behavior. Package layout consolidated to a single `dlc_builder` (no separate `dlc_v2_builder`).
+GreyBound reviewed the implementation, applied hardening fixes, consolidated packaging onto a single `dlc_builder`, and added regression tests for Taproot control-block handling, builder validation, and Signer behavior.
 
-## Limits
+## Notes
 
-Research / reference code. Do not treat as production-certified. Lending repay paths remain server-gated by design.
+Reference / research libraries for study and integration testing. Operators should still run their own spendability checks before mainnet use.
 
 ## Checks
 

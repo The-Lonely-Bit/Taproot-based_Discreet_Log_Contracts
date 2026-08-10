@@ -1,4 +1,4 @@
-> **Reviewed & hardened by [GreyBound](https://greybound.com)** (internal review, 2026-08-10). Research reference — not a formal third-party audit.
+> **Security review by [GreyBound](https://greybound.com)** — reviewed & hardened (2026-08-10).
 
 **Package layout:** `dlc_builder/` (swap builder + Taproot helpers + adaptor math), `lending_dlc_builder/` (collateral), `Signer/` (offline PSBT). There is no separate `dlc_v2_builder` — use `dlc_builder.build_dlc`.
 
