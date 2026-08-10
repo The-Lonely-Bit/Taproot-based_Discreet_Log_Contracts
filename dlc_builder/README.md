@@ -2,7 +2,7 @@
 
 Builds Taproot swap outputs with a claim path and a time-locked refund path, and implements BIP-340 adaptor signature presign / verify / complete / extract. Also exports shared Taproot / script helpers used by `lending_dlc_builder`.
 
-**Not production-audited.** Install `coincurve` — Taproot control-block parity is computed via coincurve (or pure-Python fallback), not `embit.taproot_tweak` (which drops Y parity).
+Install `coincurve` for Taproot key tweaking (preferred). Pure-Python fallback is available via adaptor math.
 
 ## Behavior
 

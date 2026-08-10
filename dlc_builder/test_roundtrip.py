@@ -61,7 +61,7 @@ def test_build_descriptor():
 
 
 def test_control_block_parity_matches_coincurve():
-    """Regression: embit taproot_tweak always reported parity=0 (fund-loss bug)."""
+    """Regression: control-block parity must match coincurve ground truth."""
     from coincurve import PrivateKey, PublicKey
     from embit import ec
 

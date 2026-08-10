@@ -42,8 +42,8 @@ def taproot_tweak_pubkey(
     """Tweak internal key with merkle root; returns (output_xonly_pubkey, parity).
 
     Parity is the Y-coordinate parity of the *full* tweaked point Q (BIP-341
-    control-block bit). Do **not** use embit's ``PublicKey.taproot_tweak`` for
-    this — it returns ``from_xonly(...)`` and always reports even-Y / parity 0.
+    control-block bit). Computed via coincurve or pure-Python; do not derive
+    parity from embit's x-only ``taproot_tweak`` helper.
     """
     if len(internal_pubkey) != 32:
         raise ValueError("Internal pubkey must be 32 bytes")

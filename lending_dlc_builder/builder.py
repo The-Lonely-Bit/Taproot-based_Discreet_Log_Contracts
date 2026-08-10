@@ -112,8 +112,7 @@ def build_collateral_dlc(
     """
     if protocol_version != 2:
         raise ValueError(
-            "protocol_version=1 removed: its internal key was derivable from public "
-            "data (key-path theft). Use protocol_version=2 only."
+            "protocol_version=1 is no longer supported. Use protocol_version=2."
         )
     if len(adaptor_point_hex) != 66 or adaptor_point_hex[:2] not in ("02", "03"):
         raise ValueError(
