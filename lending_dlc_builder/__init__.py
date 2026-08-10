@@ -1,9 +1,10 @@
 """
 Collateral DLC builder for cross-chain lending (3-leaf Taproot MAST).
 
-Protocol v2 (default): single-key repay leaf + NUMS internal key.
-Depends on ``dlc_builder`` (Taproot helpers) and ``dlc_v2_builder`` (NUMS tweak).
-Loan delivery DLC: use ``dlc_v2_builder.build_dlc_v2``.
+NUMS internal key + single-key repay leaf. Loan delivery: ``dlc_builder.build_dlc``.
+
+Repay is server-gated off-chain (adaptor secret release) — not cryptographically
+atomic the way a pure swap claim/extract loop is.
 """
 from . import attestation
 from .builder import LendingDLCDescriptor, build_collateral_dlc

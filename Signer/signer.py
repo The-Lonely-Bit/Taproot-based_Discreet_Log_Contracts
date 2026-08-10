@@ -512,6 +512,8 @@ def adaptor_point_from_secret(secret: bytes) -> bytes:
 def adaptor_presign(seckey: bytes, msg: bytes, adaptor_point: bytes) -> bytes:
     if len(msg) != 32:
         raise ValueError("msg must be 32 bytes")
+    if len(adaptor_point) != 33 or adaptor_point[0] not in (0x02, 0x03):
+        raise ValueError("adaptor_point must be 33-byte compressed (02/03)")
     d0 = int.from_bytes(seckey, "big") % _ADP_N
     if d0 == 0:
         raise ValueError("secret key is zero")
@@ -1377,14 +1379,17 @@ def build_psbt_bytes(tx: Tx, psbt_inputs: List[Dict], num_outputs: int) -> bytes
 def verify_leaf(pinp: PInput, cb: bytes, script: bytes, leaf_ver: int) -> bool:
     """
     Verify a Taproot leaf + control-block commits to the UTXO output key.
-    Falls back to True if EC math libraries aren't available
-    (the network will reject invalid spends regardless).
+
+    Fail-closed: returns False if EC libraries are unavailable or verification
+    fails. Also checks the BIP-341 control-block parity bit against Q's Y parity.
     """
-    if len(pinp.utxo_spk) != 34 or pinp.utxo_spk[0] != 0x51:
+    if len(pinp.utxo_spk) != 34 or pinp.utxo_spk[0] != 0x51 or pinp.utxo_spk[1] != 0x20:
+        return False
+    if len(cb) < 33:
         return False
     output_key = pinp.utxo_spk[2:]
     internal_key = cb[1:33]
-    path_hashes = [cb[33 + i*32 : 33 + (i+1)*32] for i in range((len(cb) - 33) // 32)]
+    path_hashes = [cb[33 + i * 32 : 33 + (i + 1) * 32] for i in range((len(cb) - 33) // 32)]
 
     lh = tap_leaf_hash(script, leaf_ver)
     merkle_root = lh
@@ -1393,47 +1398,137 @@ def verify_leaf(pinp: PInput, cb: bytes, script: bytes, leaf_ver: int) -> bool:
 
     tweak_hash = tap_tweak(internal_key, merkle_root)
 
-    # Try coincurve for full EC point verification
     try:
         import coincurve
-        P = coincurve.PublicKey(b'\x02' + internal_key)
-        Q = P.add(tweak_hash)
-        return Q.format(compressed=True)[1:] == output_key
-    except (ImportError, Exception):
-        pass
 
-    # Cannot do EC math locally — trust network verification
-    return True
+        P = coincurve.PublicKey(b"\x02" + internal_key)
+        Q = P.add(tweak_hash).format(compressed=True)
+        parity_ok = (cb[0] & 1) == (Q[0] - 2)
+        return parity_ok and Q[1:] == output_key
+    except ImportError:
+        return False
+    except Exception:
+        return False
+
+def _scriptpubkey_summary(spk: bytes, network: str = "btc") -> str:
+    """Best-effort human summary of an output scriptPubKey."""
+    try:
+        if len(spk) == 34 and spk[0] == 0x51 and spk[1] == 0x20:
+            hrp = {"btc": "bc", "fb": "bc", "ltc": "ltc", "dgb": "dgb", "bel": "bel"}.get(
+                network, "bc"
+            )
+            from embit import bech32
+
+            addr = bech32.encode(hrp, 1, spk[2:])
+            if addr:
+                return addr
+        if len(spk) == 22 and spk[0] == 0x00 and spk[1] == 0x14:
+            hrp = {"btc": "bc", "fb": "bc", "ltc": "ltc"}.get(network, "bc")
+            from embit import bech32
+
+            addr = bech32.encode(hrp, 0, spk[2:])
+            if addr:
+                return addr
+    except Exception:
+        pass
+    return spk.hex()
+
 
 
 # ═══════════════════════════════════════════════════════════════
 # Script analysis
 # ═══════════════════════════════════════════════════════════════
 
+_OP_SHA256 = 0xA8
+_OP_EQUALVERIFY = 0x88
+_OP_CHECKSIG = 0xAC
+
+
+def _read_script_push(script: bytes, offset: int) -> Optional[Tuple[bytes, int]]:
+    """Read one push; accept direct push and OP_PUSHDATA1/2/4."""
+    if offset < 0 or offset >= len(script):
+        return None
+    op = script[offset]
+    if op == 0x00:
+        return b"", offset + 1
+    if 1 <= op <= 75:
+        end = offset + 1 + op
+        if end > len(script):
+            return None
+        return script[offset + 1 : end], end
+    if op == 0x4C:
+        if offset + 2 > len(script):
+            return None
+        n = script[offset + 1]
+        end = offset + 2 + n
+        if end > len(script):
+            return None
+        return script[offset + 2 : end], end
+    if op == 0x4D:
+        if offset + 3 > len(script):
+            return None
+        n = int.from_bytes(script[offset + 1 : offset + 3], "little")
+        end = offset + 3 + n
+        if end > len(script):
+            return None
+        return script[offset + 3 : end], end
+    if op == 0x4E:
+        if offset + 5 > len(script):
+            return None
+        n = int.from_bytes(script[offset + 1 : offset + 5], "little")
+        end = offset + 5 + n
+        if end > len(script):
+            return None
+        return script[offset + 5 : end], end
+    return None
+
+
+def _parse_fal_hashlock_script(script: bytes) -> Optional[Dict[str, Any]]:
+    """OP_SHA256 <H> OP_EQUALVERIFY <lender> OP_CHECKSIG — any valid push encoding."""
+    if not script:
+        return None
+    i = 0
+    if script[i] != _OP_SHA256:
+        return None
+    i += 1
+    h_push = _read_script_push(script, i)
+    if not h_push or len(h_push[0]) != 32:
+        return None
+    i = h_push[1]
+    if i >= len(script) or script[i] != _OP_EQUALVERIFY:
+        return None
+    i += 1
+    lender_push = _read_script_push(script, i)
+    if not lender_push or len(lender_push[0]) != 32:
+        return None
+    i = lender_push[1]
+    if i != len(script) - 1 or script[i] != _OP_CHECKSIG:
+        return None
+    return {"hash_commitment": h_push[0], "lender_pubkey": lender_push[0]}
+
+
 def analyze_script(script: bytes) -> Dict[str, Any]:
     """Determine whether a tapscript is a claim or refund path and extract keys."""
-    # FAL hashlock: OP_SHA256 <32 h> OP_EQUALVERIFY <32 lender> OP_CHECKSIG
-    #  A8 20...32 88 20...32 AC  (69 bytes)
-    if (len(script) == 69 and script[0] == 0xA8 and script[1] == 0x20
-            and script[34] == 0x88 and script[35] == 0x20 and script[68] == 0xAC):
+    fal = _parse_fal_hashlock_script(script)
+    if fal:
         return {
             'type': 'lender_claim_hashlock',
-            'lender_pubkey': script[36:68],
+            'lender_pubkey': fal['lender_pubkey'],
             'sigs_needed': 1,
             'description': 'FAL lender claim: SHA256 preimage + lender key',
         }
 
-    # v2 claim: <32> OP_CHECKSIG  (single receiver key — adaptor completed off-chain)
+    # Single-key claim/repay: <32> OP_CHECKSIG (adaptor completed off-chain)
     if len(script) == 34 and script[0] == 0x20 and script[33] == 0xAC:
         return {
             'type': 'v2_claim',
             'receiver_pubkey': script[1:33],
             'sigs_needed': 1,
-            'description': 'v2 claim (single-key): completed BIP-340 adaptor signature',
+            'description': 'Single-key CHECKSIG leaf (swap claim or lending repay)',
         }
 
-    # v1 success: <32> OP_CHECKSIGVERIFY <32> OP_CHECKSIG
-    #          20 <adaptor|oracle:32> AD 20 <receiver|lender:32> AC
+    # Dual-sig: <32> OP_CHECKSIGVERIFY <32> OP_CHECKSIG
+    #          20 <first:32> AD 20 <second:32> AC  (oracle+lender, or legacy co-sign)
     if (len(script) == 68 and script[0] == 0x20 and script[33] == 0xAD
             and script[34] == 0x20 and script[67] == 0xAC):
         return {
@@ -1441,11 +1536,11 @@ def analyze_script(script: bytes) -> Dict[str, Any]:
             'adaptor_point': script[1:33],
             'receiver_pubkey': script[35:67],
             'sigs_needed': 2,
-            'description': 'Claim (dual-sig path): co-sign + receiver key (swap adaptor or oracle)',
+            'description': 'Dual-sig path (oracle+lender or legacy co-sign): VERIFY key then CHECKSIG key',
         }
 
-    # Refund: <locktime_push> OP_CLTV OP_DROP <32> OP_CHECKSIG
-    #         ... B1 75 20 <sender:32> AC
+    # CLTV + single key: used for safety refund AND fixed-term lender claim.
+    # Shape alone cannot tell borrower refund from lender seizure — label neutrally.
     for i in range(len(script)):
         if (i + 36 <= len(script) and script[i] == 0xB1 and script[i+1] == 0x75
                 and script[i+2] == 0x20 and script[i+35] == 0xAC):
@@ -1457,19 +1552,18 @@ def analyze_script(script: bytes) -> Dict[str, Any]:
                 lt_bytes = lt_data[1:1+push_len]
                 locktime = int.from_bytes(lt_bytes, 'little')
             return {
-                'type': 'refund',
+                'type': 'timelocked_single_key',
                 'sender_pubkey': sender_key,
                 'locktime': locktime,
                 'sigs_needed': 1,
-                'description': f'Refund path: sender key (locktime={locktime:,})',
+                'description': (
+                    f'CLTV + single-key path (locktime={locktime:,}) — '
+                    f'could be safety refund OR fixed-term lender claim; verify role/key'
+                ),
             }
 
     return {'type': 'unknown', 'sigs_needed': 0, 'description': 'Unknown script type'}
 
-
-# ═══════════════════════════════════════════════════════════════
-# Taproot script-path sighash (BIP-341)
-# ═══════════════════════════════════════════════════════════════
 
 def sighash_script_path(tx: Tx, idx: int, inputs: List[PInput],
                         leaf_hash: bytes, sighash_type: int = 0x00) -> bytes:
@@ -1822,6 +1916,13 @@ def sign_and_finalize(psbt_hex: str, key_bytes: bytes,
             info = analyze_script(script)
             print(f"  · Input {idx}: {info['description']}")
 
+            if not verify_leaf(pinp, cb, script, leaf_ver):
+                print(
+                    f"  ✗ Input {idx}: leaf/control-block does not commit to UTXO "
+                    f"output key (or coincurve missing) — refusing to sign this leaf"
+                )
+                continue
+
             lh = tap_leaf_hash(script, leaf_ver)
             msg = sighash_script_path(tx, idx, inputs, lh)
             print(f"    leaf_hash: {lh.hex()[:24]}…")
@@ -1902,7 +2003,7 @@ def sign_and_finalize(psbt_hex: str, key_bytes: bytes,
                 print(f"  ✓ Input {idx}: FAL hashlock claim signed (preimage + lender)")
                 break
 
-            elif info['type'] == 'refund':
+            elif info['type'] in ('refund', 'timelocked_single_key'):
                 if my_xonly != info['sender_pubkey']:
                     return None, (f"Sender key mismatch: script expects "
                                   f"{info['sender_pubkey'].hex()[:16]}…, "
@@ -2374,7 +2475,7 @@ def _do_broadcast(raw_hex: str, net: str):
 def mode_sign_psbt():
     """Interactive: sign an existing PSBT from hex."""
     # Network
-    print("\n[1] Network (btc / fb / ltc / bel / dgb / grs / bch / xec / rvn / zec / doge):")
+    print("\n[1] Network (btc / fb / ltc / bel / dgb / grs / bch / xec / rvn / doge):")
     net = input("    > ").strip().lower()
     net = normalize_signer_network(net)
     if net not in NETWORKS:
@@ -2392,23 +2493,50 @@ def mode_sign_psbt():
     except Exception as e:
         print(f"  ✗ Bad PSBT: {e}"); return
 
-    # Analyze scripts
+    # Analyze inputs + require leaf/control-block coherence
     needs_adaptor = False
     has_pre_signed = False
     needs_preimage = False
+    leaf_ok = True
     for idx, pinp in enumerate(inputs):
+        print(f"    Input {idx}: {pinp.utxo_value:,} sats")
+        if not pinp.leaves:
+            print("      (no taproot leaves — key-path / other)")
+            continue
         for cb, script_data, leaf_ver in pinp.leaves:
             info = analyze_script(script_data)
-            print(f"    Input {idx}: {pinp.utxo_value:,} sats — {info['description']}")
+            ok = verify_leaf(pinp, cb, script_data, leaf_ver)
+            mark = "✓" if ok else "✗"
+            print(f"      {mark} {info['description']}")
+            if not ok:
+                leaf_ok = False
             if info['type'] == 'lender_claim_hashlock':
                 needs_preimage = True
             if info['type'] == 'claim':
                 lh = tap_leaf_hash(script_data, leaf_ver)
                 if pinp.tap_script_sigs.get((info['adaptor_point'], lh)):
-                    print(f"    ✓ Co-signature pre-embedded (no adaptor secret needed)")
+                    print(f"      ✓ Co-signature pre-embedded (no adaptor secret needed)")
                     has_pre_signed = True
                 else:
                     needs_adaptor = True
+    if not leaf_ok:
+        print("  ✗ One or more leaves fail control-block / output-key verification — aborting")
+        return
+
+    # Outputs + fee (never blind-sign)
+    in_total = sum(p.utxo_value for p in inputs)
+    out_total = sum(o.value for o in tx.outs)
+    fee = in_total - out_total
+    print(f"\n    Outputs ({len(tx.outs)}):")
+    for i, o in enumerate(tx.outs):
+        dest = _scriptpubkey_summary(o.script_pubkey, net)
+        print(f"      [{i}] {o.value:,} sats → {dest}")
+    print(f"    Fee: {fee:,} sats  (in {in_total:,} − out {out_total:,})")
+    if fee < 0:
+        print("  ✗ Negative fee — aborting"); return
+    print("\n    Review destinations carefully. Continue? (y/n)")
+    if input("    > ").strip().lower() != "y":
+        print("  Aborted"); return
 
     # Private key
     print(f"\n[3] Private key (WIF or 64-char hex):")
@@ -2473,9 +2601,6 @@ def mode_sign_psbt():
         _do_broadcast(raw_hex, net)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Mode 2 — Recovery Kit
-# ═══════════════════════════════════════════════════════════════
 
 def _load_kit() -> Optional[Dict]:
     """Load recovery kit from file path or pasted JSON."""

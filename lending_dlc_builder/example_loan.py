@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Minimal cross-chain loan on-chain layout (v2).
+Minimal cross-chain loan on-chain layout.
 
-  - Loan delivery DLC (lender chain): 2-leaf v2 via dlc_v2_builder
+  - Loan delivery DLC (lender chain): 2-leaf via dlc_builder
   - Collateral DLC (borrower chain): 3-leaf via lending_dlc_builder
 
-Run from nexum-open-source:
   export PYTHONPATH=.
   python3 lending_dlc_builder/example_loan.py
 """
@@ -13,7 +12,7 @@ import secrets
 
 from embit import ec
 
-from dlc_v2_builder import build_dlc_v2, generate_adaptor_secret
+from dlc_builder import build_dlc, generate_adaptor_secret
 from lending_dlc_builder import build_collateral_dlc
 
 
@@ -31,7 +30,7 @@ def main() -> None:
     loan_secret_hex, loan_point_hex = generate_adaptor_secret()
     col_secret_hex, col_point_hex = generate_adaptor_secret()
 
-    loan_delivery = build_dlc_v2(
+    loan_delivery = build_dlc(
         receiver_pubkey_hex=borrower_claim_eph,
         sender_pubkey_hex=lender_wallet,
         adaptor_point_hex=loan_point_hex,

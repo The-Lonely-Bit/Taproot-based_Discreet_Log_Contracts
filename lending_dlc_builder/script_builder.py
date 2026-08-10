@@ -6,7 +6,7 @@ Provides low-level Bitcoin script construction following Bitcoin Core standards.
 
 import hashlib
 import logging
-from typing import List, Union
+from typing import List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -234,3 +234,42 @@ def tagged_hash(tag: str, data: bytes) -> bytes:
     """
     tag_hash = sha256(tag.encode('utf-8'))
     return sha256(tag_hash + tag_hash + data)
+
+
+def read_script_pushdata(script: bytes, offset: int) -> Optional[Tuple[bytes, int]]:
+    """Read one push at offset; return (data, next_offset) or None."""
+    if offset < 0 or offset >= len(script):
+        return None
+    op = script[offset]
+    if op == Script.OP_0:
+        return b"", offset + 1
+    if 1 <= op <= 75:
+        end = offset + 1 + op
+        if end > len(script):
+            return None
+        return script[offset + 1 : end], end
+    if op == Script.OP_PUSHDATA1:
+        if offset + 2 > len(script):
+            return None
+        n = script[offset + 1]
+        end = offset + 2 + n
+        if end > len(script):
+            return None
+        return script[offset + 2 : end], end
+    if op == Script.OP_PUSHDATA2:
+        if offset + 3 > len(script):
+            return None
+        n = int.from_bytes(script[offset + 1 : offset + 3], "little")
+        end = offset + 3 + n
+        if end > len(script):
+            return None
+        return script[offset + 3 : end], end
+    if op == Script.OP_PUSHDATA4:
+        if offset + 5 > len(script):
+            return None
+        n = int.from_bytes(script[offset + 1 : offset + 5], "little")
+        end = offset + 5 + n
+        if end > len(script):
+            return None
+        return script[offset + 5 : end], end
+    return None

@@ -1,3 +1,8 @@
+> **Reviewed & hardened by [GreyBound](https://greybound.com)** (internal review, 2026-08-10). Research reference — not a formal third-party audit.
+
+**Package layout:** `dlc_builder/` (swap builder + Taproot helpers + adaptor math), `lending_dlc_builder/` (collateral), `Signer/` (offline PSBT). There is no separate `dlc_v2_builder` — use `dlc_builder.build_dlc`.
+
+
 <p align="center">
   <img src="https://bridge.thelonelybit.org/nexumbit-logo.svg" width="72" height="72" alt="NexumBit Logo">
 </p>
@@ -52,17 +57,17 @@
 
 | Package | Purpose |
 |---------|---------|
-| [`dlc_v2_builder/`](dlc_v2_builder/README.md) | **Protocol v2** swap DLCs + BIP-340 adaptor math (use this for new work) |
+| [`dlc_builder/`](dlc_builder/README.md) | Swap DLCs + BIP-340 adaptor math + shared Taproot helpers |
 | [`dlc_builder/`](dlc_builder/README.md) | Deprecated v1 swap scripts + shared Taproot helpers |
 | [`lending_dlc_builder/`](lending_dlc_builder/README.md) | 3-leaf collateral DLC for cross-chain lending |
 | [`Signer/`](Signer/README.md) | Offline recovery &amp; PSBT signing (`signer.py`) |
 | [`PROTOCOL.md`](PROTOCOL.md) | Full protocol specification (v2, API detail) |
 
 ```bash
-pip install -r dlc_v2_builder/requirements.txt -r dlc_builder/requirements.txt
+pip install -r requirements.txt
 export PYTHONPATH=.
-python3 dlc_v2_builder/test_roundtrip.py
-python3 dlc_v2_builder/example_swap.py
+python3 dlc_builder/test_roundtrip.py
+python3 dlc_builder/example_swap.py
 ```
 
 ---
@@ -224,7 +229,7 @@ The protocol uses **Discreet Log Contracts (DLCs)** built on **Taproot (P2TR)** 
 
 | Open-source component | Role |
 |---|---|
-| [`dlc_v2_builder/`](dlc_v2_builder/README.md) | v2 descriptors, NUMS internal key, BIP-340 adaptor math |
+| [`dlc_builder/`](dlc_builder/README.md) | descriptors, NUMS internal key, BIP-340 adaptor math |
 | [`Signer/`](Signer/README.md) | Offline presign / complete / extract, recovery kit |
 | [`lending_dlc_builder/`](lending_dlc_builder/README.md) | 3-leaf collateral DLC |
 
@@ -449,7 +454,7 @@ The DLC address is derived following **BIP-341** Taproot output construction:
 
 > **Note**: Adaptor point `T` does **not** affect the address or scripts. It is published post-funding for presignature exchange only.
 
-Build descriptors in Python: [`dlc_v2_builder`](dlc_v2_builder/README.md).
+Build descriptors in Python: [`dlc_builder`](dlc_builder/README.md).
 
 ### PSBT Construction
 
@@ -478,7 +483,7 @@ Complete(presig, t) → (r, s)      standard Schnorr valid for P over msg
 Extract(presig, sig, T) → t       t = (s − s') mod n
 ```
 
-Implemented in [`dlc_v2_builder/adaptor_sig.py`](dlc_v2_builder/adaptor_sig.py), [`Signer/signer.py`](Signer/signer.py), and the NexumBit browser `adaptor-signer.js` (byte-compatible).
+Implemented in [`dlc_builder/adaptor_sig.py`](dlc_builder/adaptor_sig.py), [`Signer/signer.py`](Signer/signer.py), and the NexumBit browser `adaptor-signer.js` (byte-compatible).
 
 ### Why This Is Atomic
 

@@ -7,28 +7,41 @@ Three leaves:
   3. Safety Refund – CLTV + borrower
 """
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from .script_builder import Script
+from .script_builder import Script, read_script_pushdata
 
 logger = logging.getLogger(__name__)
 
 
+def parse_fal_hashlock_script(script: bytes) -> Optional[Dict[str, Any]]:
+    """Parse FAL hashlock tapscript; accepts any valid push encoding."""
+    if not script:
+        return None
+    i = 0
+    if script[i] != Script.OP_SHA256:
+        return None
+    i += 1
+    h_push = read_script_pushdata(script, i)
+    if not h_push or len(h_push[0]) != 32:
+        return None
+    i = h_push[1]
+    if i >= len(script) or script[i] != Script.OP_EQUALVERIFY:
+        return None
+    i += 1
+    lender_push = read_script_pushdata(script, i)
+    if not lender_push or len(lender_push[0]) != 32:
+        return None
+    i = lender_push[1]
+    if i != len(script) - 1 or script[i] != Script.OP_CHECKSIG:
+        return None
+    return {"hash_commitment": h_push[0], "lender_pubkey": lender_push[0]}
+
+
 def fal_hashlock_commitment_from_script(script: bytes) -> Optional[bytes]:
-    """
-    Parse the 32-byte hash commitment H from an FAL lender-claim hashlock tapscript
-    (OP_SHA256 <H> OP_EQUALVERIFY <lender> OP_CHECKSIG). Returns None if layout does not match.
-    """
-    if (
-        len(script) == 69
-        and script[0] == 0xA8
-        and script[1] == 0x20
-        and script[34] == 0x88
-        and script[35] == 0x20
-        and script[68] == 0xAC
-    ):
-        return script[2:34]
-    return None
+    """Parse 32-byte hash commitment H from FAL lender-claim hashlock tapscript."""
+    parsed = parse_fal_hashlock_script(script)
+    return parsed["hash_commitment"] if parsed else None
 
 
 def build_lending_v2_repay_script(borrower_pubkey: bytes) -> bytes:
@@ -44,25 +57,6 @@ def build_lending_v2_repay_script(borrower_pubkey: bytes) -> bytes:
     if len(borrower_pubkey) != 32:
         raise ValueError(f"borrower_pubkey must be 32 bytes (x-only), got {len(borrower_pubkey)}")
     s = Script()
-    s.push_data(borrower_pubkey)
-    s.op(Script.OP_CHECKSIG)
-    return s.to_bytes()
-
-
-def build_repay_script(adaptor_point_xonly: bytes, borrower_pubkey: bytes) -> bytes:
-    """
-    **Deprecated v1** repay leaf (2-of-2 co-sign). Use ``build_lending_v2_repay_script``.
-
-    Script: <adaptor_xonly> OP_CHECKSIGVERIFY <borrower_xonly> OP_CHECKSIG
-    """
-    if len(adaptor_point_xonly) != 32:
-        raise ValueError(f"adaptor_point_xonly must be 32 bytes (x-only), got {len(adaptor_point_xonly)}")
-    if len(borrower_pubkey) != 32:
-        raise ValueError(f"borrower_pubkey must be 32 bytes (x-only), got {len(borrower_pubkey)}")
-
-    s = Script()
-    s.push_data(adaptor_point_xonly)
-    s.op(Script.OP_CHECKSIGVERIFY)
     s.push_data(borrower_pubkey)
     s.op(Script.OP_CHECKSIG)
     return s.to_bytes()
@@ -114,12 +108,11 @@ def build_lender_claim_script(oracle_pubkey: bytes, lender_pubkey: bytes) -> byt
 
     Script: <oracle_xonly> OP_CHECKSIGVERIFY <lender_xonly> OP_CHECKSIG
 
-    Witness: <oracle_sig> <lender_sig>
+    Witness stack (bottom → top): <lender_sig> <oracle_sig>
+    (CHECKSIGVERIFY consumes the top item first against the oracle key.)
 
-    Oracle signs when:
-      (a) collateral ratio breaches liquidation threshold, OR
-      (b) loan term expired without repayment.
-    Lender can NEVER claim without oracle co-signature.
+    Oracle signature is any Schnorr sig by the oracle key over the claim
+    sighash — outcome binding is **policy**, not encoded in the script.
     """
     if len(oracle_pubkey) != 32:
         raise ValueError(f"oracle_pubkey must be 32 bytes (x-only), got {len(oracle_pubkey)}")

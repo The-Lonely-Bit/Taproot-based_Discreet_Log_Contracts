@@ -1,13 +1,10 @@
 """
-Real BIP-340 Schnorr adaptor signatures (Adaptor Signature v2).
+BIP-340 Schnorr adaptor signatures.
 
-This module implements *cryptographic* adaptor signatures — the construction the original
-NexumBit docs described but the v1 code did not actually use. It provides genuine, trustless
-atomicity: completing an adaptor signature on-chain reveals the adaptor secret `t`, which the
-counterparty extracts to complete their own claim. No coordinator needs to hold or distribute
-the secret, and the secret cannot be withheld once a claim is broadcast.
+Completing an adaptor signature reveals adaptor secret ``t``, which the
+counterparty can extract to complete their own claim.
 
-Scheme (parity-correct, verified by the roundtrip test in tests/test_adaptor_signature.py):
+Scheme (parity-correct; covered by dlc_builder/test_roundtrip.py):
 
   Setup:  signer secret d, pubkey P = d·G (x-only, even-Y per BIP-340);
           adaptor secret t, adaptor point T = t·G (full point, parity preserved).
@@ -27,14 +24,12 @@ Scheme (parity-correct, verified by the roundtrip test in tests/test_adaptor_sig
 
   Complete(presig, t) -> 64-byte BIP-340 signature (r, s):
       R_adapted = R' + T,   s = (s' + t) mod n,   r = x(R_adapted)
-      This (r, s) verifies as a standard BIP-340 signature for P over m.
 
   Extract(presig, full_sig, T) -> t:
       t = (s - s') mod n, validated against T = t·G.
 
-Pure-Python secp256k1 math is used deliberately: it is self-contained, dependency-free, and
-the canonical reference implementation, making it auditable and exactly reproducible by the
-in-browser (noble) signer and the offline signer.py.
+Pure-Python secp256k1 math: self-contained reference, matched by psbt-signer.
+Not constant-time — do not use with production keys on shared/hostile hosts.
 """
 from __future__ import annotations
 
@@ -93,7 +88,8 @@ def _point_mul(p: Point, k: int) -> Point:
 
 
 def _has_even_y(p: Point) -> bool:
-    assert p is not None
+    if p is None:
+        raise ValueError("point at infinity has no Y parity")
     return p[1] % 2 == 0
 
 
@@ -117,7 +113,8 @@ def _int(b: bytes) -> int:
 
 
 def _ser_compressed(p: Point) -> bytes:
-    assert p is not None
+    if p is None:
+        raise ValueError("cannot serialize point at infinity")
     return (b"\x02" if p[1] % 2 == 0 else b"\x03") + _bytes32(p[0])
 
 
@@ -150,6 +147,13 @@ def pubkey_xonly(seckey: bytes) -> bytes:
     return _bytes32(P[0])
 
 
+def is_valid_xonly_pubkey(pubkey: bytes) -> bool:
+    """True if ``pubkey`` is 32 bytes and lifts to a curve point (even-Y)."""
+    if len(pubkey) != 32:
+        return False
+    return _lift_x(_int(pubkey)) is not None
+
+
 def point_from_secret(secret: bytes) -> bytes:
     """33-byte compressed adaptor point T = t·G for adaptor secret t."""
     t = _int(secret) % _N
@@ -165,10 +169,12 @@ def _challenge(r_adapted_x: int, px: int, msg: bytes) -> int:
 def adaptor_presign(seckey: bytes, msg: bytes, adaptor_point: bytes) -> bytes:
     """
     Produce an adaptor pre-signature: compressed(R') || ser256(s')  (65 bytes).
-    `adaptor_point` is T (33-byte compressed preferred to preserve parity).
+    ``adaptor_point`` must be a 33-byte compressed point (parity preserved).
     """
     if len(msg) != 32:
         raise ValueError("msg must be 32 bytes (sighash)")
+    if len(adaptor_point) != 33 or adaptor_point[0] not in (0x02, 0x03):
+        raise ValueError("adaptor_point must be 33-byte compressed (02/03)")
     d0 = _int(seckey) % _N
     if d0 == 0:
         raise ValueError("secret key is zero")
@@ -202,6 +208,8 @@ def adaptor_verify(pubkey_xonly_bytes: bytes, msg: bytes, presig: bytes, adaptor
     """Verify an adaptor pre-signature without knowing the adaptor secret."""
     try:
         if len(presig) != 65 or len(pubkey_xonly_bytes) != 32 or len(msg) != 32:
+            return False
+        if len(adaptor_point) != 33 or adaptor_point[0] not in (0x02, 0x03):
             return False
         Rp = _parse_point(presig[:33])
         s = _int(presig[33:65])
@@ -247,9 +255,12 @@ def adaptor_extract(presig: bytes, full_sig: bytes, adaptor_point: bytes) -> Opt
     """
     Recover the adaptor secret t from a pre-signature and the completed (on-chain) signature.
     Returns the 32-byte secret, or None if it does not match the adaptor point.
+    ``adaptor_point`` must be 33-byte compressed (x-only T silently fails on odd-Y).
     """
     try:
         if len(presig) != 65 or len(full_sig) != 64:
+            return None
+        if len(adaptor_point) != 33 or adaptor_point[0] not in (0x02, 0x03):
             return None
         s_prime = _int(presig[33:65])
         s = _int(full_sig[32:64])

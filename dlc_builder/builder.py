@@ -1,186 +1,220 @@
 """
-DLC Builder: Taproot Discreet Log Contracts for atomic swaps.
-Builds claim path (adaptor + receiver sig) and refund path (CLTV + sender sig).
-"""
-import secrets
-from dataclasses import dataclass
-from typing import Tuple, Optional
+Taproot DLC builder — BIP-340 adaptor-signature swaps.
 
-from .script import (
-    tagged_hash,
-    build_dlc_success_script,
-    build_dlc_refund_script,
-)
+Claim path is a single-key CHECKSIG leaf; atomicity is off-chain via adaptor
+presign / complete / extract. Refund path is CLTV + sender key.
+"""
+from __future__ import annotations
+
+import secrets
+from dataclasses import asdict, dataclass
+from typing import Optional, Tuple
+
+from .script import build_dlc_claim_script, build_dlc_refund_script, tagged_hash
 from .taproot import (
+    TAPROOT_LEAF_VERSION,
+    compute_merkle_proof,
+    create_control_block,
+    taproot_address_from_pubkey,
+    taproot_leaf_hash,
+    taproot_output_script,
     taproot_tree_helper,
     taproot_tweak_pubkey,
-    taproot_output_script,
-    taproot_address_from_pubkey,
-    create_control_block,
-    compute_merkle_proof,
-    taproot_leaf_hash,
-    TAPROOT_LEAF_VERSION,
+)
+
+# BIP-341 suggested NUMS point (no known discrete log).
+NUMS_X = bytes.fromhex(
+    "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
 )
 
 
 @dataclass
 class DLCDescriptor:
-    """Full DLC descriptor for spending and address derivation."""
-    adaptor_point: str       # 66 hex (33 bytes compressed)
-    timeout: int             # Absolute block height for refund
-    receiver_pubkey: str     # 64 hex (x-only)
-    sender_pubkey: str        # 64 hex (x-only)
-    internal_pubkey: str     # 64 hex
-    merkle_root: str         # 64 hex
-    output_pubkey: str       # 64 hex
-    output_key_parity: int   # 0 or 1
-    success_script: str      # hex
-    refund_script: str       # hex
-    success_leaf_hash: str   # hex
-    refund_leaf_hash: str    # hex
-    success_control_block: str  # hex
-    refund_control_block: str   # hex
-    address: str             # bech32m
-    scriptpubkey: str        # hex
-    internal_private_key: Optional[str] = None  # 64 hex, if derived
+    """Everything needed to fund, claim, or refund a DLC output."""
 
+    version: int
+    receiver_pubkey: str
+    sender_pubkey: str
+    adaptor_point: Optional[str]
+    timeout: int
+    internal_pubkey: str
+    merkle_root: str
+    output_pubkey: str
+    output_key_parity: int
+    claim_script: str
+    refund_script: str
+    claim_leaf_hash: str
+    refund_leaf_hash: str
+    claim_control_block: str
+    refund_control_block: str
+    address: str
+    scriptpubkey: str
 
-def _normalize_xonly(pubkey_hex: str) -> str:
-    if len(pubkey_hex) == 64:
-        return pubkey_hex
-    if len(pubkey_hex) == 66 and pubkey_hex.startswith(("02", "03")):
-        return pubkey_hex[2:]
-    raise ValueError(f"Pubkey must be 64 or 66 hex chars, got {len(pubkey_hex)}")
-
-
-def _derive_internal_pubkey(
-    adaptor_point: bytes,
-    receiver_pubkey: bytes,
-    sender_pubkey: bytes,
-    timeout: int,
-) -> Tuple[Optional[str], bytes]:
-    """Deterministic internal key from DLC parameters."""
-    data = adaptor_point + receiver_pubkey + sender_pubkey + timeout.to_bytes(8, "big")
-    priv = tagged_hash("DLCInternalKey", data)
-    try:
-        from coincurve import PrivateKey
-        pk = PrivateKey(priv)
-        pub = pk.public_key.format(compressed=True)
-    except (ImportError, Exception):
-        from embit import ec
-        pk = ec.PrivateKey(priv)
-        pub = pk.get_public_key().serialize()
-    xonly = pub[1:]
-    return priv.hex(), xonly
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 def generate_adaptor_secret() -> Tuple[str, str]:
-    """Random adaptor secret and compressed public point. Returns (secret_hex, point_hex)."""
-    secret_bytes = secrets.token_bytes(32)
+    """Return (32-byte secret hex, 33-byte compressed adaptor point hex)."""
+    from .adaptor_sig import point_from_secret
+
+    secret = secrets.token_bytes(32)
+    return secret.hex(), point_from_secret(secret).hex()
+
+
+def _normalize_xonly(pubkey_hex: str) -> str:
+    pubkey_hex = pubkey_hex.strip().lower()
+    if len(pubkey_hex) == 64:
+        return pubkey_hex
+    if len(pubkey_hex) == 66 and pubkey_hex[:2] in ("02", "03"):
+        return pubkey_hex[2:]
+    raise ValueError(
+        f"Invalid pubkey length: {len(pubkey_hex)} (expected 64 or 66 hex chars)"
+    )
+
+
+def _normalize_adaptor_point(point_hex: str) -> str:
+    point_hex = point_hex.strip().lower()
+    if len(point_hex) != 66 or point_hex[:2] not in ("02", "03"):
+        raise ValueError("adaptor_point must be 66 hex chars compressed (02/03 prefix)")
+    return point_hex
+
+
+def _point_add_xonly(a_xonly: bytes, b_compressed: bytes) -> Tuple[bytes, int]:
+    if len(b_compressed) != 33 or b_compressed[0] not in (2, 3):
+        raise ValueError("b_compressed must be 33-byte compressed pubkey")
+    try:
+        from coincurve import PublicKey
+
+        a = PublicKey(b"\x02" + a_xonly)
+        b = PublicKey(b_compressed)
+        q = PublicKey.combine_keys([a, b]).format(compressed=True)
+        return q[1:], q[0] - 2
+    except ImportError:
+        from .adaptor_sig import _parse_point, _point_add, _ser_compressed
+
+        a = _parse_point(b"\x02" + a_xonly)
+        b = _parse_point(b_compressed)
+        q = _point_add(a, b)
+        if q is None:
+            raise ValueError("point add produced infinity")
+        sec = _ser_compressed(q)
+        return sec[1:], sec[0] - 2
+
+
+def derive_unspendable_internal_key(
+    claim_leaf_hash: bytes, refund_leaf_hash: bytes
+) -> bytes:
+    return derive_unspendable_internal_key_multi(claim_leaf_hash, refund_leaf_hash)
+
+
+def derive_unspendable_internal_key_multi(*leaf_hashes: bytes) -> bytes:
+    """internal = NUMS + r·G.
+
+    Domain tag ``NexumDLCv2/internal`` is historical wire identity — changing it
+    would alter addresses. It is not a protocol version name.
+    """
+    if not leaf_hashes:
+        raise ValueError("at least one leaf hash required")
+    r = tagged_hash("NexumDLCv2/internal", b"".join(leaf_hashes))
     try:
         from coincurve import PrivateKey
-        priv = PrivateKey(secret_bytes)
-        point = priv.public_key.format(compressed=True)
-    except (ImportError, Exception):
+
+        r_point = PrivateKey(r).public_key.format(compressed=True)
+    except ImportError:
         from embit import ec
-        priv = ec.PrivateKey(secret_bytes)
-        point = priv.get_public_key().serialize()
-    return secret_bytes.hex(), point.hex()
 
-
-class DLCBuilder:
-    """Build Taproot DLCs for atomic swaps (adaptor signature + CLTV refund)."""
-
-    def build_dlc(
-        self,
-        adaptor_point_hex: str,
-        timeout: int,
-        receiver_pubkey_hex: str,
-        sender_pubkey_hex: str,
-        network: str = "mainnet",
-        hrp: Optional[str] = None,
-    ) -> DLCDescriptor:
-        """
-        Build a full DLC descriptor.
-        adaptor_point_hex: 66 hex (33 bytes compressed).
-        receiver/sender_pubkey_hex: 64 hex (x-only) or 66 hex (compressed).
-        timeout: absolute block height for refund path.
-        network: mainnet, testnet, litecoin, litecoin_testnet, digibyte, bellcoin (ignored if hrp is set).
-        hrp: optional custom bech32 HRP (e.g. "dgb" for DigiByte).
-        """
-        if len(adaptor_point_hex) != 66 or not adaptor_point_hex.startswith(("02", "03")):
-            raise ValueError("Adaptor point must be 66 hex chars (compressed)")
-        rec = _normalize_xonly(receiver_pubkey_hex)
-        snd = _normalize_xonly(sender_pubkey_hex)
-        if timeout < 0:
-            raise ValueError("Timeout must be non-negative")
-
-        adaptor_point = bytes.fromhex(adaptor_point_hex)
-        receiver_pubkey = bytes.fromhex(rec)
-        sender_pubkey = bytes.fromhex(snd)
-
-        success_script = build_dlc_success_script(adaptor_point, receiver_pubkey)
-        refund_script = build_dlc_refund_script(timeout, sender_pubkey)
-
-        merkle_root, leaf_hashes = taproot_tree_helper([success_script, refund_script])
-        success_leaf_hash = leaf_hashes[0]
-        refund_leaf_hash = leaf_hashes[1]
-        assert success_leaf_hash == taproot_leaf_hash(success_script)
-        assert refund_leaf_hash == taproot_leaf_hash(refund_script)
-
-        internal_priv_hex, internal_pubkey = _derive_internal_pubkey(
-            adaptor_point, receiver_pubkey, sender_pubkey, timeout
-        )
-        output_pubkey, output_key_parity = taproot_tweak_pubkey(internal_pubkey, merkle_root)
-        scriptpubkey = taproot_output_script(output_pubkey)
-        address = taproot_address_from_pubkey(output_pubkey, network=network, hrp=hrp)
-
-        success_proof = compute_merkle_proof(success_leaf_hash, leaf_hashes)
-        refund_proof = compute_merkle_proof(refund_leaf_hash, leaf_hashes)
-        success_cb = create_control_block(
-            internal_pubkey, success_script, success_proof,
-            leaf_version=TAPROOT_LEAF_VERSION, output_key_parity=output_key_parity,
-        )
-        refund_cb = create_control_block(
-            internal_pubkey, refund_script, refund_proof,
-            leaf_version=TAPROOT_LEAF_VERSION, output_key_parity=output_key_parity,
-        )
-
-        return DLCDescriptor(
-            adaptor_point=adaptor_point_hex,
-            timeout=timeout,
-            receiver_pubkey=receiver_pubkey_hex,
-            sender_pubkey=sender_pubkey_hex,
-            internal_pubkey=internal_pubkey.hex(),
-            merkle_root=merkle_root.hex(),
-            output_pubkey=output_pubkey.hex(),
-            output_key_parity=output_key_parity,
-            success_script=success_script.hex(),
-            refund_script=refund_script.hex(),
-            success_leaf_hash=success_leaf_hash.hex(),
-            refund_leaf_hash=refund_leaf_hash.hex(),
-            success_control_block=success_cb.hex(),
-            refund_control_block=refund_cb.hex(),
-            address=address,
-            scriptpubkey=scriptpubkey.hex(),
-            internal_private_key=internal_priv_hex,
-        )
-
-
-# Convenience
-_default_builder = DLCBuilder()
+        # Explicit compressed encoding — never rely on serialize() defaults.
+        r_point = ec.PrivateKey(r).get_public_key().sec()
+    internal_xonly, _ = _point_add_xonly(NUMS_X, r_point)
+    return internal_xonly
 
 
 def build_dlc(
-    adaptor_point_hex: str,
-    timeout: int,
+    *,
     receiver_pubkey_hex: str,
     sender_pubkey_hex: str,
+    adaptor_point_hex: Optional[str] = None,
+    timeout: int,
     network: str = "mainnet",
     hrp: Optional[str] = None,
 ) -> DLCDescriptor:
-    """Build a DLC descriptor (uses default DLCBuilder instance)."""
-    return _default_builder.build_dlc(
-        adaptor_point_hex, timeout, receiver_pubkey_hex, sender_pubkey_hex,
-        network=network, hrp=hrp,
+    """
+    Build a DLC descriptor (address + scripts + control blocks).
+
+    ``adaptor_point_hex`` is optional: T does not affect the address/scripts.
+    """
+    receiver_xonly_hex = _normalize_xonly(receiver_pubkey_hex)
+    sender_xonly_hex = _normalize_xonly(sender_pubkey_hex)
+    adaptor_point_hex = (
+        _normalize_adaptor_point(adaptor_point_hex) if adaptor_point_hex else None
+    )
+    if timeout < 0:
+        raise ValueError(f"timeout must be non-negative, got {timeout}")
+
+    receiver_xonly = bytes.fromhex(receiver_xonly_hex)
+    sender_xonly = bytes.fromhex(sender_xonly_hex)
+
+    claim_script = build_dlc_claim_script(receiver_xonly)
+    refund_script = build_dlc_refund_script(timeout, sender_xonly)
+
+    merkle_root, leaf_hashes = taproot_tree_helper([claim_script, refund_script])
+    claim_leaf_hash, refund_leaf_hash = leaf_hashes[0], leaf_hashes[1]
+
+    if claim_leaf_hash != taproot_leaf_hash(claim_script, TAPROOT_LEAF_VERSION):
+        raise ValueError("claim leaf hash mismatch")
+    if refund_leaf_hash != taproot_leaf_hash(refund_script, TAPROOT_LEAF_VERSION):
+        raise ValueError("refund leaf hash mismatch")
+
+    internal_pubkey = derive_unspendable_internal_key(claim_leaf_hash, refund_leaf_hash)
+    output_pubkey, output_key_parity = taproot_tweak_pubkey(internal_pubkey, merkle_root)
+    scriptpubkey = taproot_output_script(output_pubkey)
+    if hrp:
+        address = taproot_address_from_pubkey(output_pubkey, hrp=hrp)
+    else:
+        address = taproot_address_from_pubkey(output_pubkey, network)
+
+    claim_control_block = create_control_block(
+        internal_pubkey,
+        claim_script,
+        compute_merkle_proof(claim_leaf_hash, leaf_hashes),
+        leaf_version=TAPROOT_LEAF_VERSION,
+        output_key_parity=output_key_parity,
+    )
+    refund_control_block = create_control_block(
+        internal_pubkey,
+        refund_script,
+        compute_merkle_proof(refund_leaf_hash, leaf_hashes),
+        leaf_version=TAPROOT_LEAF_VERSION,
+        output_key_parity=output_key_parity,
+    )
+
+    # Self-check: control-block parity bit must match recomputed Q parity.
+    for name, cb in (
+        ("claim", claim_control_block),
+        ("refund", refund_control_block),
+    ):
+        if (cb[0] & 1) != (output_key_parity & 1):
+            raise RuntimeError(f"{name} control-block parity mismatch")
+        if cb[0] not in (0xC0, 0xC1):
+            raise RuntimeError(f"invalid {name} control-block header 0x{cb[0]:02x}")
+
+    return DLCDescriptor(
+        version=2,
+        receiver_pubkey=receiver_xonly_hex,
+        sender_pubkey=sender_xonly_hex,
+        adaptor_point=adaptor_point_hex,
+        timeout=timeout,
+        internal_pubkey=internal_pubkey.hex(),
+        merkle_root=merkle_root.hex(),
+        output_pubkey=output_pubkey.hex(),
+        output_key_parity=output_key_parity,
+        claim_script=claim_script.hex(),
+        refund_script=refund_script.hex(),
+        claim_leaf_hash=claim_leaf_hash.hex(),
+        refund_leaf_hash=refund_leaf_hash.hex(),
+        claim_control_block=claim_control_block.hex(),
+        refund_control_block=refund_control_block.hex(),
+        address=address,
+        scriptpubkey=scriptpubkey.hex(),
     )

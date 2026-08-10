@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Minimal v2 swap leg demo: build descriptors + adaptor signature roundtrip.
+Minimal swap-leg demo: build descriptors + adaptor signature roundtrip.
 
-Run from nexum-open-source:
   export PYTHONPATH=.
-  python3 dlc_v2_builder/example_swap.py
+  python3 dlc_builder/example_swap.py
 """
 import secrets
 
 from embit import ec
 
-from dlc_v2_builder import (
+from dlc_builder import (
     adaptor_complete,
     adaptor_extract,
     adaptor_presign,
     adaptor_verify,
-    build_dlc_v2,
+    build_dlc,
     generate_adaptor_secret,
-    point_from_secret,
     pubkey_xonly,
     schnorr_verify,
 )
@@ -42,14 +40,14 @@ def main() -> None:
     timeout_a = 900_000
     timeout_b = 900_144  # B unlocks later → A is secret-holder
 
-    leg_a = build_dlc_v2(
+    leg_a = build_dlc(
         receiver_pubkey_hex=_xonly_from_scalar(claim_b),
         sender_pubkey_hex=_xonly_from_scalar(wallet_a),
         adaptor_point_hex=point_hex,
         timeout=timeout_a,
         network="mainnet",
     )
-    leg_b = build_dlc_v2(
+    leg_b = build_dlc(
         receiver_pubkey_hex=_xonly_from_scalar(claim_a),
         sender_pubkey_hex=_xonly_from_scalar(wallet_b),
         adaptor_point_hex=point_hex,

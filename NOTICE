@@ -1,0 +1,8 @@
+Builders in this directory were adapted from the NexumBit open libraries
+(Taproot builders and BIP-340 adaptor signatures).
+
+Offline PSBT signing lives in the sibling project psbt-signer/, not here.
+
+This tree is a research / reference lab. It is not a substitute for an
+independent production audit. Do not send mainnet funds to generated
+addresses without spendability verification.

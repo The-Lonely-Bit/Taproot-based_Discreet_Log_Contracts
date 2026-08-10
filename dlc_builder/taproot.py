@@ -32,34 +32,49 @@ def taproot_branch_hash(left: bytes, right: bytes) -> bytes:
     return tagged_hash("TapBranch", left + right)
 
 
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
 def taproot_tweak_pubkey(
     internal_pubkey: bytes,
     merkle_root: Optional[bytes] = None,
 ) -> Tuple[bytes, int]:
-    """Tweak internal key with merkle root; returns (output_xonly_pubkey, parity)."""
+    """Tweak internal key with merkle root; returns (output_xonly_pubkey, parity).
+
+    Parity is the Y-coordinate parity of the *full* tweaked point Q (BIP-341
+    control-block bit). Do **not** use embit's ``PublicKey.taproot_tweak`` for
+    this — it returns ``from_xonly(...)`` and always reports even-Y / parity 0.
+    """
     if len(internal_pubkey) != 32:
         raise ValueError("Internal pubkey must be 32 bytes")
     if merkle_root is not None and len(merkle_root) != 32:
         raise ValueError("Merkle root must be 32 bytes")
+
+    tweak = tagged_hash("TapTweak", internal_pubkey + (merkle_root or b""))
+    if int.from_bytes(tweak, "big") >= _SECP256K1_N:
+        raise ValueError("Taproot tweak is too large (BIP-341)")
+
     try:
-        from embit.ec import PublicKey
-        P = PublicKey.from_xonly(internal_pubkey)
-        Q = P.taproot_tweak(merkle_root or b"")
-        sec = Q.sec()
-        parity = sec[0] - 2
-        return sec[1:33], parity
-    except (ImportError, Exception):
-        pass
-    # Fallback: coincurve for combine
-    try:
-        from coincurve import PublicKey, PrivateKey
-        tweak = tagged_hash("TapTweak", internal_pubkey + (merkle_root or b""))
+        from coincurve import PrivateKey, PublicKey
+
+        # BIP-341 lift_x: even-Y representative of the internal key.
         P_obj = PublicKey(b"\x02" + internal_pubkey)
         t_point = PrivateKey(tweak).public_key
         Q = PublicKey.combine_keys([P_obj, t_point]).format(compressed=True)
         return Q[1:], Q[0] - 2
-    except (ImportError, Exception):
-        raise RuntimeError("Need embit or coincurve for Taproot tweak")
+    except ImportError:
+        pass
+
+    # Pure-Python fallback (same curve math as adaptor_sig).
+    from .adaptor_sig import _parse_point, _point_add, _point_mul, _G, _ser_compressed
+
+    P = _parse_point(b"\x02" + internal_pubkey)
+    t = int.from_bytes(tweak, "big")
+    Q = _point_add(P, _point_mul(_G, t))
+    if Q is None:
+        raise ValueError("Taproot tweak produced point at infinity")
+    sec = _ser_compressed(Q)
+    return sec[1:], sec[0] - 2
 
 
 def taproot_output_script(output_pubkey: bytes) -> bytes:

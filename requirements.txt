@@ -1,0 +1,2 @@
+embit>=0.8.0
+coincurve>=18.0.0

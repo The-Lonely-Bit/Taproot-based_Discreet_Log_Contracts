@@ -1,6 +1,8 @@
 """
 Bitcoin script utilities for DLC construction.
-BIP-342 Tapscript: success path (adaptor + receiver sig) and refund path (CLTV + sender sig).
+
+Claim path: single-key CHECKSIG (adaptor atomicity is off-chain).
+Refund path: CLTV + sender CHECKSIG.
 """
 import hashlib
 from typing import Union
@@ -78,33 +80,23 @@ class Script:
         return bytes(self.script)
 
 
-def build_dlc_success_script(adaptor_point: bytes, receiver_pubkey: bytes) -> bytes:
+def build_dlc_claim_script(receiver_pubkey: bytes) -> bytes:
     """
-    DLC claim script: <adaptor_xonly> OP_CHECKSIGVERIFY <receiver_xonly> OP_CHECKSIG.
-    Witness: <adaptor_sig> <receiver_sig>.
+    Claim path: <receiver_xonly> OP_CHECKSIG.
+
+    Atomicity is off-chain via BIP-340 adaptor signatures (see adaptor_sig.py).
     """
-    if len(adaptor_point) != 33:
-        raise ValueError("Adaptor point must be 33 bytes (compressed)")
-    if not adaptor_point.startswith((b"\x02", b"\x03")):
-        raise ValueError("Adaptor point must be compressed")
     if len(receiver_pubkey) != 32:
-        raise ValueError("Receiver pubkey must be 32 bytes (x-only)")
-    try:
-        from embit.ec import PublicKey
-        adaptor_xonly = PublicKey.parse(adaptor_point).xonly()
-    except Exception:
-        adaptor_xonly = adaptor_point[1:]
-    s = Script()
-    s.push_data(adaptor_xonly)
-    s.op(Script.OP_CHECKSIGVERIFY)
-    s.push_data(receiver_pubkey)
-    s.op(Script.OP_CHECKSIG)
-    return s.to_bytes()
+        raise ValueError(f"Receiver pubkey must be 32 bytes (x-only), got {len(receiver_pubkey)}")
+    script = Script()
+    script.push_data(receiver_pubkey)
+    script.op(Script.OP_CHECKSIG)
+    return script.to_bytes()
 
 
 def build_dlc_refund_script(timeout_blocks: int, sender_pubkey: bytes) -> bytes:
     """
-    DLC refund script: <timeout> OP_CHECKLOCKTIMEVERIFY OP_DROP <sender_xonly> OP_CHECKSIG.
+    Refund path: <timeout> OP_CHECKLOCKTIMEVERIFY OP_DROP <sender_xonly> OP_CHECKSIG.
     Witness: <sender_sig>; nLockTime >= timeout_blocks.
     """
     if len(sender_pubkey) != 32:
